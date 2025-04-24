@@ -1,11 +1,15 @@
 #!/bin/bash
+set -euo pipefail
+
+# Print error and exit on failure
+trap 'echo "❌ Error on line $LINENO. Exiting."; exit 1' ERR
 
 make_request() {
   local type="$1"
   local url="$2"
   local data="${3:-}"
 
-  curl -s -X "$type" \
+  curl -sS -X "$type" \
     -H "Content-Type: application/json" \
     -H "Authorization: PVEAPIToken=$PROXMOX_API_TOKEN" \
     -k "$PROXMOX_HOST/api2/json/nodes/pve/$url" \
@@ -22,7 +26,7 @@ create_snapshot() {
   local name="pre_deploy_${timestamp}"
   local description="Pre-deployment of stack $stack at $(date)"
 
-  echo "Creating snapshot '$name' for $machine_type ID $id (stack: $stack)"
+  echo "📸 Creating snapshot '$name' for $machine_type ID $id (stack: $stack)"
 
   local payload
   if [ "$machine_type" == "lxc" ]; then
@@ -81,5 +85,8 @@ check_newer_compose_images() {
   fi
 }
 
-# Run it
+# Execute the workflow
 check_newer_compose_images
+
+echo "✅ Script completed successfully."
+exit 0
