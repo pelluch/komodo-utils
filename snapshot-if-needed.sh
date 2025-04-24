@@ -68,19 +68,32 @@ check_newer_compose_images() {
   container_ids=$(docker compose ps --status=running --quiet)
 
   for cid in $container_ids; do
-    local image_id image_name local_images
+    local image_id image_name newest_image_id
     image_id=$(docker inspect --format '{{.Image}}' "$cid")
-    image_name=$(docker inspect --format '{{.Config.Image}}' "$cid")
-    local_images=$(docker images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep "^$image_name ")
 
-    while read -r line; do
-      local id
-      id=$(cut -d' ' -f2 <<< "$line")
-      if [[ "$id" != "$image_id" ]]; then
-        updated_found=1
-        break 2
-      fi
-    done <<< "$local_images"
+    # Get the canonical image name from docker images (avoid compose-defined aliases)
+    image_name=$(docker images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
+      | awk -v img="$image_id" '$2 == img { print $1 }' | head -n1)
+
+    if [[ -z "$image_name" ]]; then
+      echo "⚠️ Could not resolve image name for container $cid (image ID $image_id)"
+      continue
+    fi
+
+    # Get the ID of the newest pulled image matching this name
+    newest_image_id=$(docker images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}' \
+      | grep "^$image_name " | sort -rk3 | head -n1 | awk '{print $2}')
+
+    if [[ -z "$newest_image_id" ]]; then
+      echo "⚠️ No pulled images found for $image_name"
+      continue
+    fi
+
+    if [[ "$newest_image_id" != "$image_id" ]]; then
+      updated_found=1
+      echo "🔄 Detected updated image for $image_name"
+      break
+    fi
   done
 
   if [[ $updated_found -eq 1 ]]; then
@@ -90,6 +103,7 @@ check_newer_compose_images() {
     echo "✅ All images are up to date. No action needed."
   fi
 }
+
 
 # Execute the workflow
 check_newer_compose_images
