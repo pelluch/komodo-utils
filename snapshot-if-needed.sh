@@ -1,4 +1,5 @@
 #!/bin/bash
+
 set -euo pipefail
 
 # Print error and exit on failure
@@ -47,14 +48,19 @@ snapshot_self() {
   for type in lxc qemu; do
     ids=$(make_request "GET" "$type" | jq -r '.data[].vmid')
     for id in $ids; do
-      key=$([[ "$type" == "lxc" ]] && echo "hostname" || echo "name")
-      hostname=$(make_request "GET" "$type/$id/config" | jq -r ".data[\"$key\"]")
-      if [ "$hostname" == "$current_hostname" ]; then
+      if [[ "$type" == "lxc" ]]; then
+        hostname=$(make_request "GET" "$type/$id/config" | jq -r '.data.hostname')
+      else
+        hostname=$(make_request "GET" "$type/$id/agent/get-host-name" | jq -r '.data.result["host-name"]')
+      fi
+
+      if [[ "$hostname" == "$current_hostname" ]]; then
         create_snapshot "$type" "$id"
       fi
     done
   done
 }
+
 
 check_newer_compose_images() {
   local updated_found=0
