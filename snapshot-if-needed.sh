@@ -73,7 +73,16 @@ check_newer_compose_images() {
 
     # Get the canonical image name from docker images (avoid compose-defined aliases)
     image_name=$(docker images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-      | awk -v img="$image_id" '$2 == img { print $1 }' | head -n1)
+      | awk -v img="$image_id" '
+        $2 == img {
+          name = $1;
+          if (name ~ /:<none>$/) {
+            sub(/:<none>$/, ":latest", name);
+          }
+          print name;
+        }
+      ' | head -n1)
+
 
     if [[ -z "$image_name" ]]; then
       echo "⚠️ Could not resolve image name for container $cid (image ID $image_id)"
