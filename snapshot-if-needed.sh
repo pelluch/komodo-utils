@@ -73,7 +73,7 @@ check_newer_compose_images() {
 
     # Get the canonical image name from docker images (avoid compose-defined aliases)
     image_name=$(docker images --no-trunc --format '{{.Repository}} {{.ID}}' \
-      | awk -v img="$image_id" '$2 == img { print $1 )')
+      | awk -v img="$image_id" '$2 == img { print $1 }')
 
 
     if [[ -z "$image_name" ]]; then
