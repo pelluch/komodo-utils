@@ -72,29 +72,21 @@ check_newer_compose_images() {
     image_id=$(docker inspect --format '{{.Image}}' "$cid")
 
     # Get the canonical image name from docker images (avoid compose-defined aliases)
-    image_name=$(docker images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-      | awk -v img="$image_id" '
-        $2 == img {
-          name = $1;
-          if (name ~ /:<none>$/) {
-            sub(/:<none>$/, ":latest", name);
-          }
-          print name;
-        }
-      ' | head -n1)
+    image_name=$(docker images --no-trunc --format '{{.Repository}} {{.ID}}' \
+      | awk -v img="$image_id" '$2 == img { print $1 )')
 
 
     if [[ -z "$image_name" ]]; then
-      echo "⚠️ Could not resolve image name for container $cid (image ID $image_id)"
+      echo "⚠ Could not resolve image name for container $cid (image ID $image_id)"
       continue
     fi
 
     # Get the ID of the newest pulled image matching this name
-    newest_image_id=$(docker images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}' \
-      | grep "^$image_name " | sort -rk3 | head -n1 | awk '{print $2}')
+    newest_image_id=$(docker images --no-trunc --format '{{.Repository}} {{.ID}} {{.CreatedAt}}' \
+      | grep "^$image_name" | sort -rk3 | head -n1 | awk '{print $2}')
 
     if [[ -z "$newest_image_id" ]]; then
-      echo "⚠️ No pulled images found for $image_name"
+      echo "⚠ No pulled images found for $image_name"
       continue
     fi
 
