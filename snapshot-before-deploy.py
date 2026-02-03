@@ -20,7 +20,6 @@ from typing import Any
 from urllib.parse import urlencode
 
 # Configuration
-DEFAULT_CONFIG_PATH = "/config/proxmox.json"
 TASK_POLL_INTERVAL = 2  # seconds
 TASK_TIMEOUT = 120  # seconds
 
@@ -36,16 +35,16 @@ def info(msg: str) -> None:
     print(f"INFO: {msg}")
 
 
-def load_config(path: str) -> dict:
-    """Load and validate the Proxmox configuration file."""
-    if not os.path.exists(path):
-        fatal(f"Config file not found: {path}")
+def load_config() -> dict:
+    """Load and validate the Proxmox configuration from PROXMOX_CONFIG env var."""
+    config_json = os.environ.get("PROXMOX_CONFIG")
+    if not config_json:
+        fatal("PROXMOX_CONFIG environment variable not set")
 
     try:
-        with open(path, "r") as f:
-            config = json.load(f)
+        config = json.loads(config_json)
     except json.JSONDecodeError as e:
-        fatal(f"Invalid JSON in config file: {e}")
+        fatal(f"Invalid JSON in PROXMOX_CONFIG: {e}")
 
     if "proxmox_hosts" not in config:
         fatal("Config missing 'proxmox_hosts' key")
@@ -318,10 +317,9 @@ def snapshot_vm(host_config: dict, vm_type: str, vmid: int) -> None:
 
 def main() -> None:
     """Main entry point."""
-    # Load configuration
-    config_path = os.environ.get("PROXMOX_CONFIG_PATH", DEFAULT_CONFIG_PATH)
-    info(f"Loading config from {config_path}")
-    config = load_config(config_path)
+    # Load configuration from PROXMOX_CONFIG env var
+    info("Loading config from PROXMOX_CONFIG environment variable")
+    config = load_config()
 
     # Get current hostname
     current_hostname = socket.gethostname()
