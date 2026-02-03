@@ -237,60 +237,52 @@ def create_snapshot_request(
     return upid
 
 
-def delete_lxc_mount_point(host_config: dict, vmid: int, mp_key: str) -> None:
-    """Delete a mount point from LXC config."""
-    # Proxmox API: setting a key to empty string or using 'delete' param removes it
-    make_request(host_config, "PUT", f"lxc/{vmid}/config", {"delete": mp_key})
+def has_bind_mounts(config: dict) -> list[str]:
+    """
+    Check if an LXC config has bind mounts.
+    Returns list of bind mount keys (e.g., ['mp0', 'mp1']) or empty list.
+
+    Bind mounts have a source path starting with '/' (e.g., '/mnt/data,mp=/data').
+    """
+    bind_mounts = []
+    for key, value in config.items():
+        if key.startswith("mp") and isinstance(value, str):
+            # Mount point format: "source,mp=destination[,options]"
+            # Bind mounts have source starting with /
+            if value.startswith("/"):
+                bind_mounts.append(key)
+    return bind_mounts
 
 
-def restore_lxc_mount_point(
-    host_config: dict, vmid: int, mp_key: str, mp_value: str
-) -> None:
-    """Restore a mount point to LXC config."""
-    make_request(host_config, "PUT", f"lxc/{vmid}/config", {mp_key: mp_value})
-
-
-def create_lxc_snapshot(host_config: dict, vmid: int) -> None:
+def create_lxc_snapshot(host_config: dict, vmid: int) -> bool:
     """
     Create a snapshot for an LXC container.
-    Handles mount points by temporarily removing them.
+    Returns True if snapshot was created, False if skipped.
+
+    Skips LXCs with bind mounts (requires root@pam to modify).
     """
-    # Get current config and extract mount points
+    # Get current config and check for bind mounts
     config = get_lxc_config(host_config, vmid)
-    mount_points = {k: v for k, v in config.items() if k.startswith("mp")}
+    bind_mounts = has_bind_mounts(config)
 
-    if mount_points:
-        info(f"Found {len(mount_points)} mount point(s), temporarily removing...")
+    if bind_mounts:
+        print(
+            f"WARNING: Skipping snapshot - LXC {vmid} has bind mounts ({', '.join(bind_mounts)}) "
+            "which cannot be snapshotted without root@pam privileges",
+            file=sys.stderr,
+        )
+        return False
 
-    try:
-        # Remove mount points
-        for mp_key in mount_points:
-            info(f"  Removing {mp_key}")
-            delete_lxc_mount_point(host_config, vmid, mp_key)
+    # Create snapshot
+    timestamp = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
+    stack = os.path.basename(os.getcwd())
+    snapname = f"pre_deploy_{timestamp}"
+    description = f"Pre-deployment of stack {stack} at {datetime.now()}"
 
-        # Create snapshot
-        timestamp = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
-        stack = os.path.basename(os.getcwd())
-        snapname = f"pre_deploy_{timestamp}"
-        description = f"Pre-deployment of stack {stack} at {datetime.now()}"
-
-        info(f"Creating snapshot '{snapname}'...")
-        upid = create_snapshot_request(host_config, "lxc", vmid, snapname, description)
-        wait_for_task(host_config, upid)
-
-    finally:
-        # ALWAYS restore mount points
-        if mount_points:
-            info("Restoring mount points...")
-            for mp_key, mp_value in mount_points.items():
-                info(f"  Restoring {mp_key}")
-                try:
-                    restore_lxc_mount_point(host_config, vmid, mp_key, mp_value)
-                except SystemExit as e:
-                    # Log but don't exit - we want to try restoring all mount points
-                    print(
-                        f"WARNING: Failed to restore {mp_key}: {e}", file=sys.stderr
-                    )
+    info(f"Creating snapshot '{snapname}'...")
+    upid = create_snapshot_request(host_config, "lxc", vmid, snapname, description)
+    wait_for_task(host_config, upid)
+    return True
 
 
 def create_qemu_snapshot(host_config: dict, vmid: int) -> None:
@@ -305,14 +297,19 @@ def create_qemu_snapshot(host_config: dict, vmid: int) -> None:
     wait_for_task(host_config, upid)
 
 
-def snapshot_vm(host_config: dict, vm_type: str, vmid: int) -> None:
-    """Dispatch to the appropriate snapshot function based on VM type."""
+def snapshot_vm(host_config: dict, vm_type: str, vmid: int) -> bool:
+    """
+    Dispatch to the appropriate snapshot function based on VM type.
+    Returns True if snapshot was created, False if skipped.
+    """
     if vm_type == "lxc":
-        create_lxc_snapshot(host_config, vmid)
+        return create_lxc_snapshot(host_config, vmid)
     elif vm_type == "qemu":
         create_qemu_snapshot(host_config, vmid)
+        return True
     else:
         fatal(f"Unknown VM type: {vm_type}")
+        return False  # unreachable
 
 
 def main() -> None:
@@ -336,9 +333,10 @@ def main() -> None:
     host_config, vm_type, vmid = result
 
     # Create snapshot
-    snapshot_vm(host_config, vm_type, vmid)
-
-    info("Snapshot completed successfully!")
+    if snapshot_vm(host_config, vm_type, vmid):
+        info("Snapshot completed successfully!")
+    else:
+        info("Snapshot skipped (see warning above). Deployment will continue.")
 
 
 if __name__ == "__main__":
