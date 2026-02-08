@@ -54,7 +54,7 @@ def load_config() -> dict:
         fatal("'proxmox_hosts' must be a non-empty list")
 
     for i, host in enumerate(hosts):
-        for key in ("url", "api_token", "node"):
+        for key in ("ip", "api_token", "node"):
             if key not in host:
                 fatal(f"Host {i} missing required key: {key}")
 
@@ -82,7 +82,7 @@ def make_request(
     Raises:
         Exits on any error
     """
-    url = f"{host_config['url']}/api2/json/nodes/{host_config['node']}/{endpoint}"
+    url = f"https://{host_config['ip']}:8006/api2/json/nodes/{host_config['node']}/{endpoint}"
 
     # Prepare request
     headers = {
@@ -158,7 +158,7 @@ def find_host_in_proxmox(
         Tuple of (host_config, vm_type, vmid) if found, None otherwise
     """
     for host_config in hosts:
-        info(f"Searching Proxmox at {host_config['url']}...")
+        info(f"Searching Proxmox at {host_config['ip']}...")
 
         # Check LXC containers
         for lxc in list_vms(host_config, "lxc"):
