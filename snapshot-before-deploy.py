@@ -165,6 +165,8 @@ def find_host_in_proxmox(
             vmid = lxc.get("vmid")
             if vmid is None:
                 continue
+            if lxc.get("status") != "running":
+                continue
             hostname = get_lxc_hostname(host_config, vmid)
             if hostname == target_hostname:
                 info(f"Found LXC {vmid} with hostname '{hostname}'")
@@ -174,6 +176,8 @@ def find_host_in_proxmox(
         for qemu in list_vms(host_config, "qemu"):
             vmid = qemu.get("vmid")
             if vmid is None:
+                continue
+            if qemu.get("status") != "running":
                 continue
             hostname = get_qemu_hostname(host_config, vmid)
             if hostname is None:
