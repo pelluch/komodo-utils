@@ -22,6 +22,17 @@ from urllib.parse import urlencode
 # Configuration
 TASK_POLL_INTERVAL = 2  # seconds
 TASK_TIMEOUT = 120  # seconds
+SNAPSHOT_REUSE_WINDOW = 300  # seconds - skip snapshot if one was created within this window
+
+
+class ApiError(Exception):
+    """Raised when a Proxmox API request fails."""
+
+    def __init__(self, status_code: int, body: str, url: str):
+        self.status_code = status_code
+        self.body = body
+        self.url = url
+        super().__init__(f"HTTP {status_code} from {url}: {body}")
 
 
 def fatal(msg: str) -> None:
@@ -107,7 +118,7 @@ def make_request(
             return json.loads(response_body)
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8") if e.fp else ""
-        fatal(f"HTTP {e.code} from {url}: {error_body}")
+        raise ApiError(e.code, error_body, url)
     except urllib.error.URLError as e:
         fatal(f"Failed to connect to {url}: {e.reason}")
     except json.JSONDecodeError:
@@ -143,7 +154,7 @@ def get_qemu_hostname(host_config: dict, vmid: int) -> str | None:
         response = make_request(host_config, "GET", f"qemu/{vmid}/agent/get-host-name")
         result = response.get("data", {}).get("result", {})
         return result.get("host-name")
-    except SystemExit:
+    except ApiError:
         # Guest agent not available - return None to skip this VM
         return None
 
@@ -190,10 +201,18 @@ def find_host_in_proxmox(
     return None
 
 
+class TaskError(Exception):
+    """Raised when a Proxmox task fails."""
+
+    def __init__(self, exitstatus: str):
+        self.exitstatus = exitstatus
+        super().__init__(f"Task failed with status: {exitstatus}")
+
+
 def wait_for_task(host_config: dict, upid: str) -> None:
     """
     Poll a Proxmox task until it completes.
-    Exits with error if task fails or times out.
+    Raises TaskError if the task fails, or exits on timeout.
     """
     info(f"Waiting for task {upid}...")
     start_time = time.time()
@@ -212,7 +231,7 @@ def wait_for_task(host_config: dict, upid: str) -> None:
                 info("Task completed successfully")
                 return
             else:
-                fatal(f"Task failed with status: {exitstatus}")
+                raise TaskError(exitstatus)
 
         time.sleep(TASK_POLL_INTERVAL)
 
@@ -239,6 +258,26 @@ def create_snapshot_request(
         fatal("Snapshot request did not return a task UPID")
 
     return upid
+
+
+def find_recent_snapshot(host_config: dict, vm_type: str, vmid: int) -> str | None:
+    """
+    Check if a pre_deploy snapshot was already created recently on this VM.
+    Returns the snapshot name if found, None otherwise.
+    """
+    response = make_request(host_config, "GET", f"{vm_type}/{vmid}/snapshot")
+    snapshots = response.get("data", [])
+
+    now = time.time()
+    for snap in snapshots:
+        name = snap.get("name", "")
+        snaptime = snap.get("snaptime")
+        if name.startswith("pre_deploy_") and snaptime:
+            age = now - snaptime
+            if age < SNAPSHOT_REUSE_WINDOW:
+                return name
+
+    return None
 
 
 def has_bind_mounts(config: dict) -> list[str]:
@@ -277,28 +316,50 @@ def create_lxc_snapshot(host_config: dict, vmid: int) -> bool:
         )
         return False
 
-    # Create snapshot
-    timestamp = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
-    stack = os.path.basename(os.getcwd())
-    snapname = f"pre_deploy_{timestamp}"
-    description = f"Pre-deployment of stack {stack} at {datetime.now()}"
-
-    info(f"Creating snapshot '{snapname}'...")
-    upid = create_snapshot_request(host_config, "lxc", vmid, snapname, description)
-    wait_for_task(host_config, upid)
-    return True
+    return try_create_snapshot(host_config, "lxc", vmid)
 
 
-def create_qemu_snapshot(host_config: dict, vmid: int) -> None:
+def create_qemu_snapshot(host_config: dict, vmid: int) -> bool:
     """Create a snapshot for a QEMU VM."""
+    return try_create_snapshot(host_config, "qemu", vmid)
+
+
+def try_create_snapshot(host_config: dict, vm_type: str, vmid: int) -> bool:
+    """
+    Create a snapshot, skipping if a recent one already exists.
+    Handles the race condition where another concurrent deploy creates
+    a snapshot between our check and our create attempt.
+    """
+    # Check if another deploy already snapshotted this VM recently
+    recent = find_recent_snapshot(host_config, vm_type, vmid)
+    if recent:
+        info(
+            f"Snapshot '{recent}' already exists on {vm_type}/{vmid} "
+            f"(created within last {SNAPSHOT_REUSE_WINDOW}s). Skipping."
+        )
+        return True
+
     timestamp = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
     stack = os.path.basename(os.getcwd())
     snapname = f"pre_deploy_{timestamp}"
     description = f"Pre-deployment of stack {stack} at {datetime.now()}"
 
     info(f"Creating snapshot '{snapname}'...")
-    upid = create_snapshot_request(host_config, "qemu", vmid, snapname, description)
-    wait_for_task(host_config, upid)
+    try:
+        upid = create_snapshot_request(host_config, vm_type, vmid, snapname, description)
+        wait_for_task(host_config, upid)
+    except ApiError as e:
+        if "already used" in e.body or "already exists" in e.body:
+            info(f"Snapshot '{snapname}' was just created by another deploy. Skipping.")
+            return True
+        fatal(str(e))
+    except TaskError as e:
+        if "already used" in e.exitstatus or "already exists" in e.exitstatus:
+            info(f"Snapshot '{snapname}' was just created by another deploy. Skipping.")
+            return True
+        fatal(str(e))
+
+    return True
 
 
 def snapshot_vm(host_config: dict, vm_type: str, vmid: int) -> bool:
@@ -309,8 +370,7 @@ def snapshot_vm(host_config: dict, vm_type: str, vmid: int) -> bool:
     if vm_type == "lxc":
         return create_lxc_snapshot(host_config, vmid)
     elif vm_type == "qemu":
-        create_qemu_snapshot(host_config, vmid)
-        return True
+        return create_qemu_snapshot(host_config, vmid)
     else:
         fatal(f"Unknown VM type: {vm_type}")
         return False  # unreachable
