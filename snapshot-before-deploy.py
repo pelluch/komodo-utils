@@ -390,9 +390,12 @@ def main() -> None:
     result = find_host_in_proxmox(config["proxmox_hosts"], current_hostname)
 
     if result is None:
-        fatal(
-            f"Hostname '{current_hostname}' not found in any configured Proxmox instance"
+        print(
+            f"WARNING: Hostname '{current_hostname}' not found in any configured Proxmox instance. "
+            "Skipping snapshot. Deployment will continue.",
+            file=sys.stderr,
         )
+        return
 
     host_config, vm_type, vmid = result
 
