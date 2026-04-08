@@ -9,15 +9,19 @@ Handles LXC mount points by temporarily removing them before snapshotting.
 
 import json
 import os
-import socket
+import re
 import ssl
 import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+
+# Matches a MAC address in colon-separated hex format
+MAC_RE = re.compile(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}")
 
 # Configuration
 TASK_POLL_INTERVAL = 2  # seconds
@@ -139,31 +143,51 @@ def get_lxc_config(host_config: dict, vmid: int) -> dict:
     return response.get("data", {})
 
 
-def get_lxc_hostname(host_config: dict, vmid: int) -> str | None:
-    """Get the hostname of an LXC container."""
-    config = get_lxc_config(host_config, vmid)
-    return config.get("hostname")
+def get_local_macs() -> set[str]:
+    """
+    Get all MAC addresses from local network interfaces.
+    Reads from /sys/class/net/*/address, skipping loopback.
+    Returns a set of lowercase MAC strings.
+    """
+    macs = set()
+    net_dir = Path("/sys/class/net")
+    for iface in net_dir.iterdir():
+        if iface.name == "lo":
+            continue
+        addr_file = iface / "address"
+        try:
+            mac = addr_file.read_text().strip().lower()
+            if mac and mac != "00:00:00:00:00:00":
+                macs.add(mac)
+        except OSError:
+            continue
+    return macs
 
 
-def get_qemu_hostname(host_config: dict, vmid: int) -> str | None:
+def extract_mac_from_net_config(net_value: str) -> str | None:
     """
-    Get the hostname of a QEMU VM via guest agent.
-    Returns None if guest agent is not available.
+    Extract MAC address from a Proxmox net config value.
+
+    LXC format:  name=eth0,bridge=vmbr0,...,hwaddr=BC:24:11:4D:00:CC,...
+    QEMU format: virtio=BC:24:11:93:59:F2,bridge=vmbr0,...
     """
-    try:
-        response = make_request(host_config, "GET", f"qemu/{vmid}/agent/get-host-name")
-        result = response.get("data", {}).get("result", {})
-        return result.get("host-name")
-    except ApiError:
-        # Guest agent not available - return None to skip this VM
-        return None
+    match = MAC_RE.search(net_value.lower())
+    return match.group(0) if match else None
+
+
+def get_vm_mac(host_config: dict, vm_type: str, vmid: int) -> str | None:
+    """Get the MAC address from a VM/LXC's net0 config."""
+    config = make_request(host_config, "GET", f"{vm_type}/{vmid}/config")
+    net0 = config.get("data", {}).get("net0", "")
+    return extract_mac_from_net_config(net0)
 
 
 def find_host_in_proxmox(
-    hosts: list[dict], target_hostname: str
+    hosts: list[dict], local_macs: set[str]
 ) -> tuple[dict, str, int] | None:
     """
-    Search all Proxmox instances for a VM/LXC matching the target hostname.
+    Search all Proxmox instances for a VM/LXC whose net0 MAC matches
+    one of the local machine's MAC addresses.
 
     Returns:
         Tuple of (host_config, vm_type, vmid) if found, None otherwise
@@ -171,32 +195,18 @@ def find_host_in_proxmox(
     for host_config in hosts:
         info(f"Searching Proxmox at {host_config['ip']}...")
 
-        # Check LXC containers
-        for lxc in list_vms(host_config, "lxc"):
-            vmid = lxc.get("vmid")
-            if vmid is None:
-                continue
-            if lxc.get("status") != "running":
-                continue
-            hostname = get_lxc_hostname(host_config, vmid)
-            if hostname == target_hostname:
-                info(f"Found LXC {vmid} with hostname '{hostname}'")
-                return (host_config, "lxc", vmid)
-
-        # Check QEMU VMs
-        for qemu in list_vms(host_config, "qemu"):
-            vmid = qemu.get("vmid")
-            if vmid is None:
-                continue
-            if qemu.get("status") != "running":
-                continue
-            hostname = get_qemu_hostname(host_config, vmid)
-            if hostname is None:
-                # Guest agent not available, skip
-                continue
-            if hostname == target_hostname:
-                info(f"Found QEMU VM {vmid} with hostname '{hostname}'")
-                return (host_config, "qemu", vmid)
+        for vm_type in ("lxc", "qemu"):
+            for vm in list_vms(host_config, vm_type):
+                vmid = vm.get("vmid")
+                if vmid is None:
+                    continue
+                if vm.get("status") != "running":
+                    continue
+                mac = get_vm_mac(host_config, vm_type, vmid)
+                if mac and mac in local_macs:
+                    name = vm.get("name", "?")
+                    info(f"Found {vm_type.upper()} {vmid} ({name}) matching MAC {mac}")
+                    return (host_config, vm_type, vmid)
 
     return None
 
@@ -382,16 +392,16 @@ def main() -> None:
     info("Loading config from PROXMOX_CONFIG environment variable")
     config = load_config()
 
-    # Get current hostname
-    current_hostname = socket.gethostname()
-    info(f"Current hostname: {current_hostname}")
+    # Get local MAC addresses for matching
+    local_macs = get_local_macs()
+    info(f"Local MAC addresses: {', '.join(sorted(local_macs))}")
 
     # Find this host in Proxmox
-    result = find_host_in_proxmox(config["proxmox_hosts"], current_hostname)
+    result = find_host_in_proxmox(config["proxmox_hosts"], local_macs)
 
     if result is None:
         print(
-            f"WARNING: Hostname '{current_hostname}' not found in any configured Proxmox instance. "
+            "WARNING: No Proxmox VM/LXC found matching local MAC addresses. "
             "Skipping snapshot. Deployment will continue.",
             file=sys.stderr,
         )
